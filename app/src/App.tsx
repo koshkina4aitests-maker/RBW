@@ -1,12 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
 
-type TabId = 'tasks' | 'dashboard' | 'analytics'
+type TabId = 'tasks' | 'dashboard' | 'analytics' | 'documents'
 type TaskType = 'Операционные' | 'Проектные' | 'Документооборот' | 'Персонал'
 type TaskStatus = 'Новая' | 'В работе' | 'На согласовании' | 'Выполнена'
 type Priority = 'Низкий' | 'Средний' | 'Высокий'
 type NotificationAction = 'approval' | 'signature' | 'review'
+type ReportMode = 'monthly' | 'cumulative'
+type DocumentStatus = 'pending_signature' | 'approved' | 'signed'
 
 interface Task {
   id: number
@@ -31,11 +33,62 @@ interface NotificationItem {
   action: NotificationAction
 }
 
-interface AnalyticsPoint {
-  month: string
-  created: number
+interface ReportTimelinePoint {
+  monthKey: string
+  monthLabel: string
+  assigned: number
   completed: number
   overdue: number
+  approvals: number
+  cumulativeAssigned: number
+  cumulativeCompleted: number
+  cumulativeOverdue: number
+  cumulativeApprovals: number
+}
+
+interface EmployeeReportPoint {
+  employeeName: string
+  assigned: number
+  completed: number
+  overdue: number
+  approvals: number
+  completionRate: number
+}
+
+interface ReportOverviewResponse {
+  timeline: ReportTimelinePoint[]
+  availableMonths: string[]
+  selectedMonth: string | null
+  selectedSummary: ReportTimelinePoint | null
+  employeeBreakdown: EmployeeReportPoint[]
+}
+
+interface DocumentItem {
+  id: number
+  documentNumber: string
+  title: string
+  department: string
+  ownerName: string
+  status: DocumentStatus
+  content: string
+  createdAt: string
+  approvedAt: string | null
+  signedAt: string | null
+  signerName: string | null
+  signatureCode: string | null
+}
+
+interface DocumentsResponse {
+  documents: DocumentItem[]
+}
+
+interface CurrentDocumentResponse {
+  document: DocumentItem
+}
+
+interface SignDocumentResponse {
+  alreadySigned: boolean
+  document: DocumentItem
 }
 
 interface TaskDraft {
@@ -64,6 +117,12 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
   Выполнена: '#40b985',
 }
 const DASHBOARD_COLORS = ['#5f8dff', '#4cb6c2', '#f2aa4c', '#7f6bff']
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api'
+const DOCUMENT_STATUS_LABELS: Record<DocumentStatus, string> = {
+  pending_signature: 'Ожидает подписи',
+  approved: 'Согласован',
+  signed: 'Подписан',
+}
 
 const getDateOffset = (days: number): string => {
   const date = new Date()
@@ -137,7 +196,7 @@ const INITIAL_NOTIFICATIONS: NotificationItem[] = [
     createdAt: '2 мин назад',
     unread: true,
     requireAction: true,
-    actionLabel: 'Перейти к подписанию',
+    actionLabel: 'Открыть документ',
     action: 'signature',
   },
   {
@@ -162,17 +221,21 @@ const INITIAL_NOTIFICATIONS: NotificationItem[] = [
   },
 ]
 
-const ANALYTICS_SERIES: AnalyticsPoint[] = [
-  { month: 'Сен', created: 48, completed: 41, overdue: 5 },
-  { month: 'Окт', created: 52, completed: 46, overdue: 4 },
-  { month: 'Ноя', created: 57, completed: 50, overdue: 6 },
-  { month: 'Дек', created: 50, completed: 47, overdue: 3 },
-  { month: 'Янв', created: 62, completed: 55, overdue: 4 },
-  { month: 'Фев', created: 58, completed: 53, overdue: 3 },
-]
-
 const formatDate = (isoDate: string): string =>
-  new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: 'short' }).format(new Date(isoDate))
+  new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: 'short' }).format(
+    new Date(`${isoDate}T12:00:00`),
+  )
+
+const formatDateTime = (isoDateTime: string | null): string =>
+  isoDateTime
+    ? new Intl.DateTimeFormat('ru-RU', {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+      }).format(new Date(isoDateTime))
+    : '—'
 
 const buildDonutGradient = (counts: number[]): string => {
   const total = counts.reduce((sum, value) => sum + value, 0)
@@ -191,15 +254,11 @@ const buildDonutGradient = (counts: number[]): string => {
   return `conic-gradient(${segments})`
 }
 
-const buildLinePoints = (
-  points: AnalyticsPoint[],
-  key: 'created' | 'completed',
-  maxValue: number,
-): string =>
-  points
-    .map((point, index) => {
-      const x = points.length === 1 ? 0 : (index / (points.length - 1)) * 100
-      const y = 90 - (point[key] / maxValue) * 70
+const buildLinePoints = (values: number[], maxValue: number): string =>
+  values
+    .map((value, index) => {
+      const x = values.length === 1 ? 0 : (index / (values.length - 1)) * 100
+      const y = 90 - (value / maxValue) * 70
       return `${x},${y}`
     })
     .join(' ')
@@ -221,6 +280,19 @@ function App() {
     dueDate: getDateOffset(3),
     description: '',
   })
+  const [reportMode, setReportMode] = useState<ReportMode>('monthly')
+  const [reportTimeline, setReportTimeline] = useState<ReportTimelinePoint[]>([])
+  const [selectedMonth, setSelectedMonth] = useState<string | null>(null)
+  const [availableMonths, setAvailableMonths] = useState<string[]>([])
+  const [employeeBreakdown, setEmployeeBreakdown] = useState<EmployeeReportPoint[]>([])
+  const [reportsLoading, setReportsLoading] = useState(false)
+  const [reportsError, setReportsError] = useState('')
+  const [documents, setDocuments] = useState<DocumentItem[]>([])
+  const [currentDocument, setCurrentDocument] = useState<DocumentItem | null>(null)
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [documentsError, setDocumentsError] = useState('')
+  const [signerName, setSignerName] = useState('Генеральный директор')
+  const [signingInProgress, setSigningInProgress] = useState(false)
 
   const unreadNotificationsCount = useMemo(
     () => notifications.filter((item) => item.unread).length,
@@ -293,28 +365,146 @@ function App() {
     [byStatusStats],
   )
 
-  const maxChartValue = useMemo(
-    () => Math.max(...ANALYTICS_SERIES.flatMap((point) => [point.created, point.completed]), 1),
-    [],
-  )
-  const createdLinePoints = useMemo(
-    () => buildLinePoints(ANALYTICS_SERIES, 'created', maxChartValue),
-    [maxChartValue],
-  )
-  const completedLinePoints = useMemo(
-    () => buildLinePoints(ANALYTICS_SERIES, 'completed', maxChartValue),
-    [maxChartValue],
+  const reportTimelineView = useMemo(
+    () =>
+      reportTimeline.map((point) => ({
+        ...point,
+        assignedView: reportMode === 'monthly' ? point.assigned : point.cumulativeAssigned,
+        completedView: reportMode === 'monthly' ? point.completed : point.cumulativeCompleted,
+        overdueView: reportMode === 'monthly' ? point.overdue : point.cumulativeOverdue,
+        approvalsView: reportMode === 'monthly' ? point.approvals : point.cumulativeApprovals,
+      })),
+    [reportMode, reportTimeline],
   )
 
-  const completionTrend = useMemo(() => {
-    const created = ANALYTICS_SERIES.reduce((sum, item) => sum + item.created, 0)
-    const completed = ANALYTICS_SERIES.reduce((sum, item) => sum + item.completed, 0)
-    return created ? Math.round((completed / created) * 100) : 0
-  }, [])
-  const overdueTrend = useMemo(
-    () => ANALYTICS_SERIES.reduce((sum, item) => sum + item.overdue, 0),
-    [],
+  const maxChartValue = useMemo(() => {
+    const values = reportTimelineView.flatMap((point) => [point.assignedView, point.completedView])
+    return Math.max(...values, 1)
+  }, [reportTimelineView])
+
+  const assignedLinePoints = useMemo(
+    () => buildLinePoints(reportTimelineView.map((point) => point.assignedView), maxChartValue),
+    [maxChartValue, reportTimelineView],
   )
+
+  const completedLinePoints = useMemo(
+    () => buildLinePoints(reportTimelineView.map((point) => point.completedView), maxChartValue),
+    [maxChartValue, reportTimelineView],
+  )
+
+  const selectedMonthSummary = useMemo(
+    () => reportTimeline.find((point) => point.monthKey === selectedMonth) ?? null,
+    [reportTimeline, selectedMonth],
+  )
+
+  const selectedMonthMetrics = useMemo(() => {
+    if (!selectedMonthSummary) {
+      return null
+    }
+    return reportMode === 'monthly'
+      ? {
+          assigned: selectedMonthSummary.assigned,
+          completed: selectedMonthSummary.completed,
+          overdue: selectedMonthSummary.overdue,
+          approvals: selectedMonthSummary.approvals,
+        }
+      : {
+          assigned: selectedMonthSummary.cumulativeAssigned,
+          completed: selectedMonthSummary.cumulativeCompleted,
+          overdue: selectedMonthSummary.cumulativeOverdue,
+          approvals: selectedMonthSummary.cumulativeApprovals,
+        }
+  }, [reportMode, selectedMonthSummary])
+
+  const totalReportStats = useMemo(() => {
+    return reportTimeline.reduce(
+      (accumulator, point) => {
+        accumulator.assigned += point.assigned
+        accumulator.completed += point.completed
+        accumulator.overdue += point.overdue
+        accumulator.approvals += point.approvals
+        return accumulator
+      },
+      { assigned: 0, completed: 0, overdue: 0, approvals: 0 },
+    )
+  }, [reportTimeline])
+
+  const completionTrend = useMemo(() => {
+    if (!totalReportStats.assigned) {
+      return 0
+    }
+    return Math.round((totalReportStats.completed / totalReportStats.assigned) * 100)
+  }, [totalReportStats.assigned, totalReportStats.completed])
+
+  const monthLabelMap = useMemo(
+    () => Object.fromEntries(reportTimeline.map((point) => [point.monthKey, point.monthLabel])),
+    [reportTimeline],
+  )
+
+  const currentDocumentStatusLabel = useMemo(
+    () => (currentDocument ? DOCUMENT_STATUS_LABELS[currentDocument.status] : ''),
+    [currentDocument],
+  )
+
+  const loadReports = useCallback(async (monthOverride?: string) => {
+    setReportsLoading(true)
+    setReportsError('')
+    try {
+      const queryString = monthOverride ? `?month=${encodeURIComponent(monthOverride)}` : ''
+      const response = await fetch(`${API_BASE_URL}/reports/overview${queryString}`)
+      if (!response.ok) {
+        throw new Error(`Ошибка загрузки отчетности: ${response.status}`)
+      }
+      const payload = (await response.json()) as ReportOverviewResponse
+      setReportTimeline(payload.timeline)
+      setAvailableMonths(payload.availableMonths)
+      setSelectedMonth(payload.selectedMonth)
+      setEmployeeBreakdown(payload.employeeBreakdown)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось загрузить отчетность'
+      setReportsError(message)
+    } finally {
+      setReportsLoading(false)
+    }
+  }, [])
+
+  const loadDocuments = useCallback(async () => {
+    setDocumentsLoading(true)
+    setDocumentsError('')
+    try {
+      const [currentResponse, listResponse] = await Promise.all([
+        fetch(`${API_BASE_URL}/documents/current`),
+        fetch(`${API_BASE_URL}/documents`),
+      ])
+
+      if (!currentResponse.ok && currentResponse.status !== 404) {
+        throw new Error(`Ошибка загрузки документа: ${currentResponse.status}`)
+      }
+      if (!listResponse.ok) {
+        throw new Error(`Ошибка загрузки документов: ${listResponse.status}`)
+      }
+
+      if (currentResponse.status === 404) {
+        setCurrentDocument(null)
+      } else {
+        const currentPayload = (await currentResponse.json()) as CurrentDocumentResponse
+        setCurrentDocument(currentPayload.document)
+      }
+
+      const listPayload = (await listResponse.json()) as DocumentsResponse
+      setDocuments(listPayload.documents)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось загрузить документы'
+      setDocumentsError(message)
+    } finally {
+      setDocumentsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    void loadReports()
+    void loadDocuments()
+  }, [loadDocuments, loadReports])
 
   useEffect(() => {
     const candidate = notifications.find(
@@ -395,6 +585,12 @@ function App() {
     setPopupNotification(null)
     setIsNotificationOpen(false)
 
+    if (notification.action === 'signature') {
+      setActiveTab('documents')
+      setFlashMessage('Открыта вкладка документа. Выполните подписание.')
+      return
+    }
+
     if (notification.action === 'review') {
       setActiveTab('analytics')
       setFlashMessage('Открыт аналитический отчет по текущему периоду.')
@@ -404,6 +600,57 @@ function App() {
     setActiveTab('tasks')
     setTaskFilter('На согласовании')
     setFlashMessage('Открыты задачи, требующие согласования или подписания.')
+  }
+
+  const handleReportMonthChange = (month: string) => {
+    setSelectedMonth(month)
+    void loadReports(month)
+  }
+
+  const handleSignDocument = async () => {
+    if (!currentDocument) {
+      return
+    }
+    setSigningInProgress(true)
+    setDocumentsError('')
+    try {
+      const response = await fetch(`${API_BASE_URL}/documents/${currentDocument.id}/sign`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signerName }),
+      })
+      if (!response.ok) {
+        throw new Error(`Ошибка подписания документа: ${response.status}`)
+      }
+
+      const payload = (await response.json()) as SignDocumentResponse
+      setCurrentDocument(payload.document)
+      setFlashMessage(
+        payload.alreadySigned
+          ? 'Документ уже был подписан ранее.'
+          : 'Документ успешно подписан электронной подписью.',
+      )
+
+      setNotifications((prev) =>
+        prev.map((item) =>
+          item.action === 'signature'
+            ? {
+                ...item,
+                unread: false,
+                requireAction: false,
+                description: 'Подписание завершено, документ отправлен в архив.',
+              }
+            : item,
+        ),
+      )
+
+      await loadDocuments()
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Не удалось подписать документ'
+      setDocumentsError(message)
+    } finally {
+      setSigningInProgress(false)
+    }
   }
 
   const handleDraftChange = <K extends keyof TaskDraft>(field: K, value: TaskDraft[K]) => {
@@ -524,6 +771,13 @@ function App() {
           onClick={() => setActiveTab('analytics')}
         >
           Аналитическая отчетность
+        </button>
+        <button
+          type="button"
+          className={activeTab === 'documents' ? 'active' : ''}
+          onClick={() => setActiveTab('documents')}
+        >
+          Документы и подпись
         </button>
       </nav>
 
@@ -772,6 +1026,126 @@ function App() {
                 ))}
               </div>
             </section>
+
+            <section className="surface-card report-surface">
+              <div className="card-head report-head">
+                <div>
+                  <h2>Отчетность подчиненных (PostgreSQL)</h2>
+                  <p>Синтетические данные по задачам сотрудников: помесячно и накопительно.</p>
+                </div>
+                <div className="report-controls">
+                  <label>
+                    Месяц
+                    <select
+                      value={selectedMonth ?? ''}
+                      onChange={(event) => handleReportMonthChange(event.target.value)}
+                      disabled={!availableMonths.length || reportsLoading}
+                    >
+                      {availableMonths.map((monthKey) => (
+                        <option key={monthKey} value={monthKey}>
+                          {monthLabelMap[monthKey] ?? monthKey}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="mode-switch">
+                    <button
+                      type="button"
+                      className={reportMode === 'monthly' ? 'active' : ''}
+                      onClick={() => setReportMode('monthly')}
+                    >
+                      За месяц
+                    </button>
+                    <button
+                      type="button"
+                      className={reportMode === 'cumulative' ? 'active' : ''}
+                      onClick={() => setReportMode('cumulative')}
+                    >
+                      Накопительно
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {reportsLoading ? <p className="loading-note">Загрузка отчетности из PostgreSQL...</p> : null}
+              {reportsError ? <p className="error-note">{reportsError}</p> : null}
+
+              {!reportsLoading && !reportsError && reportTimelineView.length ? (
+                <>
+                  <div className="line-chart">
+                    <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="График отчетности">
+                      <line x1="0" y1="90" x2="100" y2="90" />
+                      <line x1="0" y1="60" x2="100" y2="60" />
+                      <line x1="0" y1="30" x2="100" y2="30" />
+                      <polyline className="created-line" points={assignedLinePoints} />
+                      <polyline className="completed-line" points={completedLinePoints} />
+                    </svg>
+                    <div className="chart-labels dynamic-labels">
+                      {reportTimelineView.map((point) => (
+                        <span key={point.monthKey}>{point.monthLabel}</span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="chart-legend">
+                    <span>
+                      <i className="legend created" />
+                      Назначено задач
+                    </span>
+                    <span>
+                      <i className="legend completed" />
+                      Выполнено задач
+                    </span>
+                  </div>
+
+                  <div className="report-kpi-grid">
+                    <article>
+                      <p>{reportMode === 'monthly' ? 'Назначено за месяц' : 'Назначено накопительно'}</p>
+                      <h3>{selectedMonthMetrics?.assigned ?? 0}</h3>
+                    </article>
+                    <article>
+                      <p>{reportMode === 'monthly' ? 'Выполнено за месяц' : 'Выполнено накопительно'}</p>
+                      <h3>{selectedMonthMetrics?.completed ?? 0}</h3>
+                    </article>
+                    <article>
+                      <p>{reportMode === 'monthly' ? 'Просрочено за месяц' : 'Просрочено накопительно'}</p>
+                      <h3>{selectedMonthMetrics?.overdue ?? 0}</h3>
+                    </article>
+                    <article>
+                      <p>{reportMode === 'monthly' ? 'Согласования за месяц' : 'Согласования накопительно'}</p>
+                      <h3>{selectedMonthMetrics?.approvals ?? 0}</h3>
+                    </article>
+                  </div>
+
+                  <div className="table-wrap">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th>Сотрудник</th>
+                          <th>Назначено</th>
+                          <th>Выполнено</th>
+                          <th>Просрочено</th>
+                          <th>Согласования</th>
+                          <th>Исполнение</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {employeeBreakdown.map((employee) => (
+                          <tr key={employee.employeeName}>
+                            <td>{employee.employeeName}</td>
+                            <td>{employee.assigned}</td>
+                            <td>{employee.completed}</td>
+                            <td>{employee.overdue}</td>
+                            <td>{employee.approvals}</td>
+                            <td>{employee.completionRate}%</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              ) : null}
+            </section>
           </div>
         ) : null}
 
@@ -781,7 +1155,7 @@ function App() {
               <div className="card-head chart-head">
                 <div>
                   <h2>Аналитическая динамика</h2>
-                  <p>Количество созданных и закрытых задач по месяцам.</p>
+                  <p>Данные по отчетности подчиненных на основании PostgreSQL.</p>
                 </div>
                 <button className="ghost-btn" type="button">
                   Экспорт отчета
@@ -793,12 +1167,12 @@ function App() {
                   <line x1="0" y1="90" x2="100" y2="90" />
                   <line x1="0" y1="60" x2="100" y2="60" />
                   <line x1="0" y1="30" x2="100" y2="30" />
-                  <polyline className="created-line" points={createdLinePoints} />
+                  <polyline className="created-line" points={assignedLinePoints} />
                   <polyline className="completed-line" points={completedLinePoints} />
                 </svg>
-                <div className="chart-labels">
-                  {ANALYTICS_SERIES.map((point) => (
-                    <span key={point.month}>{point.month}</span>
+                <div className="chart-labels dynamic-labels">
+                  {reportTimelineView.map((point) => (
+                    <span key={point.monthKey}>{point.monthLabel}</span>
                   ))}
                 </div>
               </div>
@@ -806,7 +1180,7 @@ function App() {
               <div className="chart-legend">
                 <span>
                   <i className="legend created" />
-                  Создано задач
+                  Назначено задач
                 </span>
                 <span>
                   <i className="legend completed" />
@@ -824,17 +1198,17 @@ function App() {
                 <article>
                   <p>Процент исполнения</p>
                   <h3>{completionTrend}%</h3>
-                  <span>По данным последних 6 месяцев</span>
+                  <span>По данным всего отчетного периода</span>
                 </article>
                 <article>
                   <p>Просроченные задачи</p>
-                  <h3>{overdueTrend}</h3>
-                  <span>Суммарно за отчетный период</span>
+                  <h3>{totalReportStats.overdue}</h3>
+                  <span>Суммарно за все месяцы</span>
                 </article>
                 <article>
                   <p>Открытые согласования</p>
-                  <h3>{onApprovalTasks}</h3>
-                  <span>Требуют вашего решения сегодня</span>
+                  <h3>{totalReportStats.approvals}</h3>
+                  <span>Накопительный итог по отчетам</span>
                 </article>
               </div>
             </section>
@@ -842,25 +1216,153 @@ function App() {
             <section className="surface-card">
               <div className="card-head">
                 <h2>Таблица отчетности</h2>
-                <p>Детализация результатов по месяцам.</p>
+                <p>Детализация результатов по месяцам и накопительный итог.</p>
               </div>
               <div className="table-wrap">
                 <table>
                   <thead>
                     <tr>
                       <th>Месяц</th>
-                      <th>Создано</th>
+                      <th>Назначено</th>
                       <th>Выполнено</th>
                       <th>Просрочено</th>
+                      <th>Накоп. назначено</th>
+                      <th>Накоп. выполнено</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {ANALYTICS_SERIES.map((point) => (
-                      <tr key={point.month}>
-                        <td>{point.month}</td>
-                        <td>{point.created}</td>
+                    {reportTimeline.map((point) => (
+                      <tr key={point.monthKey}>
+                        <td>{point.monthLabel}</td>
+                        <td>{point.assigned}</td>
                         <td>{point.completed}</td>
                         <td>{point.overdue}</td>
+                        <td>{point.cumulativeAssigned}</td>
+                        <td>{point.cumulativeCompleted}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {activeTab === 'documents' ? (
+          <div className="documents-layout">
+            <section className="surface-card">
+              <div className="card-head">
+                <div>
+                  <h2>Визуализация документа и подписания</h2>
+                  <p>Просмотр документа, статус согласования и подписание электронной подписью.</p>
+                </div>
+                {currentDocument ? (
+                  <span className={`document-status-pill status-${currentDocument.status}`}>
+                    {currentDocumentStatusLabel}
+                  </span>
+                ) : null}
+              </div>
+
+              {documentsLoading ? <p className="loading-note">Загрузка документа...</p> : null}
+              {documentsError ? <p className="error-note">{documentsError}</p> : null}
+
+              {!documentsLoading && !documentsError && currentDocument ? (
+                <div className="document-layout">
+                  <article className="document-paper">
+                    <header>
+                      <p>Служебный документ</p>
+                      <h3>{currentDocument.title}</h3>
+                    </header>
+
+                    <div className="document-meta">
+                      <span>
+                        <strong>Номер:</strong> {currentDocument.documentNumber}
+                      </span>
+                      <span>
+                        <strong>Подразделение:</strong> {currentDocument.department}
+                      </span>
+                      <span>
+                        <strong>Инициатор:</strong> {currentDocument.ownerName}
+                      </span>
+                      <span>
+                        <strong>Создан:</strong> {formatDateTime(currentDocument.createdAt)}
+                      </span>
+                    </div>
+
+                    <p className="document-text">{currentDocument.content}</p>
+
+                    <div className="signature-zone">
+                      <h4>Статус подписания</h4>
+                      {currentDocument.status === 'signed' ? (
+                        <div className="signature-stamp">
+                          <p>Документ подписан</p>
+                          <strong>{currentDocument.signerName}</strong>
+                          <span>{formatDateTime(currentDocument.signedAt)}</span>
+                          <code>{currentDocument.signatureCode}</code>
+                        </div>
+                      ) : (
+                        <p className="pending-note">
+                          Документ ожидает подписи руководителя. После подписания статус обновится
+                          автоматически.
+                        </p>
+                      )}
+                    </div>
+                  </article>
+
+                  <aside className="signature-panel">
+                    <h3>Подписание документа</h3>
+                    <p>Введите ФИО подписанта и подтвердите действие.</p>
+                    <label>
+                      Подписант
+                      <input
+                        type="text"
+                        value={signerName}
+                        onChange={(event) => setSignerName(event.target.value)}
+                        placeholder="ФИО руководителя"
+                        disabled={currentDocument.status === 'signed'}
+                      />
+                    </label>
+                    <button
+                      className="primary-btn"
+                      type="button"
+                      disabled={currentDocument.status === 'signed' || signingInProgress}
+                      onClick={handleSignDocument}
+                    >
+                      {currentDocument.status === 'signed'
+                        ? 'Документ уже подписан'
+                        : signingInProgress
+                          ? 'Подписание...'
+                          : 'Подписать документ'}
+                    </button>
+                  </aside>
+                </div>
+              ) : null}
+            </section>
+
+            <section className="surface-card">
+              <div className="card-head">
+                <h2>Реестр документов</h2>
+                <p>История документов с текущими статусами.</p>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Номер</th>
+                      <th>Документ</th>
+                      <th>Подразделение</th>
+                      <th>Статус</th>
+                      <th>Подписант</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {documents.map((document) => (
+                      <tr key={document.id}>
+                        <td>{document.documentNumber}</td>
+                        <td>{document.title}</td>
+                        <td>{document.department}</td>
+                        <td>{DOCUMENT_STATUS_LABELS[document.status]}</td>
+                        <td>{document.signerName ?? '—'}</td>
                       </tr>
                     ))}
                   </tbody>
