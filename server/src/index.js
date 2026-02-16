@@ -7,11 +7,12 @@ import { formatMonthLabel, initializeDatabase, parseMonthKey } from './seed.js'
 dotenv.config()
 
 const app = express()
+const host = process.env.HOST ?? '85.209.0.78'
 const port = Number(process.env.PORT ?? 4000)
 
 const parseCorsOrigins = () => {
   if (!process.env.CORS_ORIGIN) {
-    return true
+    return [`http://85.209.0.78:5173`]
   }
   return process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim())
 }
@@ -305,8 +306,8 @@ const start = async () => {
     return
   }
 
-  app.listen(port, () => {
-    console.log(`Server started on http://localhost:${port}`)
+  app.listen(port, host, () => {
+    console.log(`Server started on http://${host}:${port}`)
   })
 }
 

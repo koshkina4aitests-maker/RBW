@@ -8,6 +8,11 @@ const { Pool } = pg
 const sslEnabled = process.env.PGSSL === 'true'
 const poolConfig = {
   max: Number(process.env.PG_POOL_MAX ?? 10),
+  host: process.env.PGHOST ?? '85.209.0.78',
+  port: Number(process.env.PGPORT ?? 5432),
+  database: process.env.PGDATABASE ?? 'rbw',
+  user: process.env.PGUSER ?? 'postgres',
+  password: process.env.PGPASSWORD ?? 'postgres',
 }
 
 if (process.env.DATABASE_URL) {

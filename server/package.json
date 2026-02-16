@@ -7,7 +7,8 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "node --watch src/index.js",
     "start": "node src/index.js",
-    "seed": "node src/index.js --seed-only"
+    "seed": "node src/index.js --seed-only",
+    "load-synthetic-data": "node src/load-synthetic-data.js"
   },
   "keywords": [],
   "author": "",

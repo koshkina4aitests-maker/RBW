@@ -31,10 +31,12 @@ npm install
 cp .env.example .env
 ```
 
-Настройте подключение к PostgreSQL в `.env`:
+В конфиге `.env` уже проставлен IP `85.209.0.78`.
+При необходимости проверьте ключевые параметры:
 
-- `DATABASE_URL=postgres://user:password@host:5432/dbname`
-  или стандартные переменные `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`.
+- `HOST=85.209.0.78`
+- `DATABASE_URL=postgres://postgres:postgres@85.209.0.78:5432/rbw`
+- `CORS_ORIGIN=http://85.209.0.78:5173`
 
 Запуск:
 
@@ -47,6 +49,12 @@ npm run dev
 - создает таблицы отчетности и документов (если их нет);
 - заполняет их синтетическими данными (если таблицы пустые).
 
+Отдельный скрипт для загрузки синтетических данных в БД:
+
+```bash
+npm run load-synthetic-data
+```
+
 ### 2) Запуск frontend
 
 В новом терминале:
@@ -54,11 +62,14 @@ npm run dev
 ```bash
 cd app
 npm install
+cp .env.example .env
 npm run dev
 ```
 
-По умолчанию frontend обращается к API `http://localhost:4000/api`.
-При необходимости задайте `VITE_API_BASE_URL`.
+В конфиге frontend также явно проставлен IP `85.209.0.78`:
+
+- `VITE_API_BASE_URL=http://85.209.0.78:4000/api`
+- `VITE_DEV_HOST=85.209.0.78`
 
 ## Что реализовано
 

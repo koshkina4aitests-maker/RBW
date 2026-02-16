@@ -117,7 +117,7 @@ const STATUS_COLORS: Record<TaskStatus, string> = {
   Выполнена: '#40b985',
 }
 const DASHBOARD_COLORS = ['#5f8dff', '#4cb6c2', '#f2aa4c', '#7f6bff']
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000/api'
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://85.209.0.78:4000/api'
 const DOCUMENT_STATUS_LABELS: Record<DocumentStatus, string> = {
   pending_signature: 'Ожидает подписи',
   approved: 'Согласован',
